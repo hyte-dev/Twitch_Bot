@@ -1,4 +1,5 @@
 import json
+import secrets
 import paho.mqtt.client as mqtt
 from datetime import datetime, timedelta
 
@@ -20,7 +21,7 @@ class mqttHandler():
 		self.base_topic = "twitch_bot/%s" % (username)
 
 		self.client = mqtt.Client(client_id="Twitch_bot", clean_session=True)
-		self.client.username_pw_set("homeassistant", password="MG8xntWamcxVwkx4")
+		self.client.username_pw_set(secrets.MQTT_USERNAME, password=secrets.MQTT_PASSWORD)
 		self.client.will_set(self.base_topic + "/lwt", payload="offline", qos=0, retain=False)
 
 		self.client.connect(self.host, port=1883, keepalive=9999)	

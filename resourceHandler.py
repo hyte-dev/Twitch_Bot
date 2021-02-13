@@ -36,6 +36,14 @@ def readCSV(fileName):
     return []
   f.close()
 
+def readRAW(fileName):
+  try:
+    f = open(fileName, "r")
+    return f
+  except:
+    #print("ERROR: Unable to Load file: %s."% (fileName))
+    return []
+  f.close()
 
 def readFile(fileName):
   try:
