@@ -1,0 +1,13 @@
+!*.py
+!.gitignore
+!*.md
+
+StartCmds
+secrets.py
+
+test.py
+TODO.txt
+twitchHydra.py
+
+data/
+__pycache__/
