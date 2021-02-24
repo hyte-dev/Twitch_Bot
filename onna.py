@@ -1,19 +1,27 @@
 import sys
 import json
+import time
 import secrets
 import requests
 import threading
 import webbrowser
+import debugger as db
 import scheduler as sh
 import twitchBot as tb
 import resourceHandler as rh
-from datetime import datetime, timedelta
+#from datetime import datetime, timedelta
 from requests_oauthlib import OAuth2Session
 
 class onna():
-	def __init__(self, username, user_chat_token):
-		self.debug = True;
-		self.options = {"FIRST_X_CHANNELS": 3, "EVENT_FREQUENCY": 120, "CHANNEL_LANGUAGE" :"en"}
+	def __init__(self, username, user_chat_token, debug_level = 9):
+		self.debugger = db.debugger(prefix="ONNA", level=debug_level)
+		self.debug = False;
+		
+		self.options = {"FIRST_X_CHANNELS": 1, 
+						"EVENT_FREQUENCY": 60, 
+						"CHANNEL_LANGUAGE" :"en", 
+						"VIEWER_COUNT_MAX": 24000,
+						"VIEWER_COUNT_MIN": 10000 }
 		self.eventScheduler = sh.scheduler(self)
 		
 		self.client_id =  secrets.CLIENT_ID
@@ -23,6 +31,7 @@ class onna():
 
 		self.header = {'Authorization': 'Bearer ' + self.client_token['access_token'], 'Client-Id': self.client_id}
 		self.verify = True
+
 		
 
 		self.base_url = "https://api.twitch.tv/helix"
@@ -42,68 +51,63 @@ class onna():
 
 		self.recurrentRequests()
 
-		timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-		print("[ONNA][%s]Initialized." %(timeInfo))
+		self.debugger.log("Initialized.")
 
 	def recurrentRequests(self):
 		self.getTopChannels()
 		self.attachBots()
+		self.telemetry()
 		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			print("[ONNA][%s]Data Tick." %(timeInfo))
+			self.debugger.log("Data Tick. - Scheduled: %s" %(list(self.eventScheduler.events.keys())), 1)
 
 	def attachBots(self):
-		channels = list(set(self.bots.keys()) - set(self.channels_top.keys()))
 		#Closes old Bots
 		removed = []
 		added = []
 		for channel in self.bots.keys():
 			if channel not in self.channels_top.keys():
-				print("[ONNA][%s] Bot Shut Down."%(channel))
-				self.leaveChannel(channel)
+				self.debugger("Shut Down %s bot."%(channel))
 				removed.append(channel)
+				self.bots[channel].exit()				
+		for channel in removed:
+			del self.bots[channel]
+				
 
 		#Spins up new bots
 		for channel in self.channels_top.keys():
 			if channel not in self.bots.keys():
-				print("[ONNA][%s] Bot Spun Up. Channel has %s viewers."%(channel[0:4], (self.channels_top[channel])["viewer_count"]))
+				self.debugger.log("Bot Spun Up. %s has %s viewers."%(channel, (self.channels_top[channel])["viewer_count"]))
 				self.followChannel(channel)
 				self.joinChannel(channel)
 				added.append(channel)
-
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			print("[ONNA][%s][BOTS]Channels: %s - Added: %s - Removed: %s" %(timeInfo, list(self.channels_top.keys()), added, removed))
+				time.sleep(5)
+		
+		self.debugger.log("Channels: %s - Added: %s - Removed: %s" %(list(self.channels_top.keys()), added, removed), 2)
 
 
 	def getTopChannels(self):
 		self.channels_top = {}
-		r = self.get('streams?first=%s&language=%s'%(self.options['FIRST_X_CHANNELS'], self.options['CHANNEL_LANGUAGE']))
+		r = self.get('streams?first=%s&language=%s'%(30, self.options['CHANNEL_LANGUAGE']))
 		for channel in r['data']:
-			username = channel['user_name']
-			self.channels_top[username] = channel
-			if self.debug:
-				timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-				print("[ONNA][%s] %s" %(timeInfo, channel))
+			if (self.options['VIEWER_COUNT_MIN'] <= channel["viewer_count"] and channel["viewer_count"] <= self.options['VIEWER_COUNT_MAX']) and len(self.channels_top) < self.options['FIRST_X_CHANNELS']:
+				username = channel['user_name']
+				self.channels_top[username] = channel
+				self.debugger.log(channel, 4)
+
 
 	def followChannel(self, channel):
 		(self.channels_top[channel])["user_id"]
 		header = {'Authorization': 'Bearer ' + self.user_client_token["access_token"], 'Client-Id': self.client_id}
 		data = {"from_id": self.user_id, "to_id": (self.channels_top[channel])["id"]}
 		r = requests.post("%s/%s"%(self.base_url, "users/follows"), headers=header,  data=data, verify=self.verify)
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			print("[ONNA][%s] Follow @ %s - %s - %s" %(timeInfo, channel, r, data))
+		self.debugger.log("Follow @ %s - %s - %s" %(channel, r, data), 4)
+
 
 	def joinChannel(self, channel):
 		self.bots[channel] =  tb.TwitchBot(self.username, channel, self.user_chat_token)
 		self.bots[channel].debug = self.debug
 		thread = threading.Thread(target=self.bots[channel].start)
 		thread.start()
-
-	def leaveChannel(self, channel):
-		self.bots[channel].exit()
-
 
 
 	def getOAuth(self):
@@ -112,14 +116,12 @@ class onna():
 		r = requests.post(oAuth_url).json()
 		clientTokenRefresh = sh.functionEvent(self, 'clientTokenRefresh', self.getOAuth, r["expires_in"] - 20, False)
 		self.eventScheduler.addEvent(clientTokenRefresh)
-		if self.debug:
-				timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-				print("[ONNA][%s] %s" %(timeInfo, r))
-		print("[ONNA]Client Authenticated to Twitch.")
+		self.debugger.log(r, 8)
+		self.debugger.log("Client Authenticated to Twitch.", 0)
 		return r
 
 	def requestAuth(self):
-		print("[ONNA]Authenticating as %s to Twitch." %(self.username))
+		self.debugger.log("[ONNA]Authenticating as %s to Twitch." %(self.username), 0)
 
 		authURL = "https://id.twitch.tv/oauth2/authorize"
 		tokenURL = "https://id.twitch.tv/oauth2/token"
@@ -133,10 +135,8 @@ class onna():
 			print("Visit this page in your browser:\n{}".format(authorization_url))		
 			code = input("Paste CODE you get back here: ")		
 			r = requests.post("%s?client_id=%s&client_secret=%s&code=%s&grant_type=authorization_code&redirect_uri=%s"%(tokenURL, self.client_id, self.client_secret, code, redirect_uri), verify=self.verify)
-			
-			if self.debug:
-					timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-					print("[ONNA][%s] %s" %(timeInfo, r.json()))
+			self.debugger.log(r.json(), 0)
+
 		else:
 			refreshURL = "%s?grant_type=refresh_token&refresh_token=%s&client_id=%s&client_secret=%s"%(tokenURL, saved_token["refresh_token"], self.client_id, self.client_secret)
 			r = requests.post(refreshURL)
@@ -145,15 +145,21 @@ class onna():
 		rh.writeJSON("data/metastate", token)
 		userClientTokenRefresh = sh.functionEvent(self, 'appTokenRefresh', self.requestAuth, token["expires_in"] - 20 , False)
 		self.eventScheduler.addEvent(userClientTokenRefresh)
-		print("[ONNA]Succuessfully Authenticated to twitch as %s." %(self.username))			
+		self.debugger.log("Succuessfully Authenticated to twitch as %s." %(self.username), 0)
 		return token
+
+	def telemetry(self):
+		br = "Telemetry Report"
+		for channel in self.bots.keys():
+			br = br + "\n\t%s\tVC:%s\tLive:%s\t:Last Message:%s"%(channel, (self.channels_top[channel])["viewer_count"], self.bots[channel].live, self.bots[channel].last_message)
+		self.debugger.log(br)
 
 	def get(self, service):
 		r = requests.get("%s/%s"%(self.base_url, service), headers=self.header, verify=self.verify)
 		try:
 		  r.raise_for_status()
 		except requests.exceptions.HTTPError as e:
-		  print(e)
+		  self.debugger.log(e, 5)
 		  return {'data': e}
 		return r.json()
 

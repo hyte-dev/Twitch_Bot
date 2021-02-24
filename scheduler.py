@@ -103,8 +103,7 @@ class broadcastEvent(event):
 class functionEvent(event):
 	def __init__(self, bot, name, callback, time, repeat=False):
 		self.bot = bot
-
-		if time is datetime:
+		if type(time) is datetime:
 			seconds = (time - datetime.utcnow()).seconds
 			if bot.debug:
 				timeInfo = datetime.utcnow().strftime('%H:%M:%S')

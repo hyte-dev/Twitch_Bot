@@ -9,6 +9,8 @@ import random
 import scheduler as sh
 import resourceHandler as rh
 from datetime import datetime, timedelta
+# use prefix to determine the chat emote prefix
+
 
 class chatHandler():
 	def __init__(self, bot, cooldown = [20,100]):
@@ -65,6 +67,7 @@ class chatHandler():
 			for trigger in list(self.keywords.keys()):
 				if all(words in message['message'].split() for words in trigger.split(' ')):
 					cmd_reactor = self.keywords[trigger]
+					message["keyword"] = trigger
 					responce =  cmd_reactor(message)
 					if responce is not None:
 						self.lastTriggered = datetime.utcnow()
@@ -137,9 +140,10 @@ class chatResponce():
 			return ""
 
 
-	def execute(self, responceList):
+	def execute(self, responceList, flavor="", aftertaste=""):
 		randomResponse = random.randint(0, len(responceList))-1
 		delay = random.randint(self.min_delay*1000, self.max_delay*1000)/1000
+		responceList[randomResponse] = flavor + responceList[randomResponse] + aftertaste
 		message = self.processMessage(responceList[randomResponse])
 		bcEvent = sh.broadcastEvent(bot = self.bot, name=self.name, message=message, freq=delay)
 		self.bot.eventScheduler.addEvent(bcEvent)
@@ -178,11 +182,16 @@ This is for when the bot will be listening for #<threshhold> messages containing
 It will wait for <cooldown> seconds until it reacts again.
 """
 class threshholdResponce(chatResponce):
-	def __init__(self, bot, name, keywords = [], responce = [''], subResponce = [],  threshhold = 4, period = 2, cooldown = 60, min_delay=0, max_delay=3, responceOpt = {'t':0, 'p': 0.5}):
+	def __init__(self, bot, name, keywords = [], responce = [''], subResponce = [],  threshhold = 4, period = 2, cooldown = 60, min_delay=0, max_delay=3, responceOpt = {'t':0, 'p': 0.5}, flavor = [], aftertaste = []):
 		self.count = 0
 		self.period = period
 		self.cooldown = cooldown
 		self.threshhold = threshhold
+		
+		self.flavor = flavor
+		self.aftertaste = aftertaste
+
+		self.lastMessage = ""		
 		self.lastCounted = datetime.utcnow()
 		self.lastTriggered = datetime.now() + timedelta(seconds=cooldown)
 		super().__init__(bot, name, keywords, responce, subResponce, min_delay, max_delay, responceOpt) 
@@ -190,8 +199,11 @@ class threshholdResponce(chatResponce):
 	def reactor(self, message):
 		if (datetime.utcnow()-self.lastTriggered).seconds < self.cooldown or (datetime.utcnow()-self.lastCounted).seconds > self.period:
 			self.count = 0
+			self.lastMessage = ""
 		self.count += 1
 		self.lastCounted = datetime.utcnow()
+		self.lastMessage = message["message"]
+
 		if self.bot.chatHandler.debug_threshhold:
 			timeInfo = datetime.utcnow().strftime('%H:%M:%S')
 			debug = '[Thresh. Resp.][%s][%s]:Count %d/%d - Streak-time %s/%s' % (timeInfo, self.name, self.count, self.threshhold, (datetime.utcnow()-self.lastCounted).seconds, self.period)

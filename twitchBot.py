@@ -7,6 +7,7 @@ import irc.bot
 import secrets
 import requests
 import threading
+import debugger as db
 import scheduler as sh
 import backupBroker as bb
 import mqttHandler as mqtt
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 from time import strftime, strptime
 
 class TwitchBot(irc.bot.SingleServerIRCBot):
-	def __init__(self, username, channel, token):
+	def __init__(self, username, channel, token, port = 6667, debug_level=0):
 		self.username = username
 		self.client_id =  secrets.CHAT_CLIENT_ID
 		self.channel = '#' + channel
@@ -27,10 +28,10 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		
 		#debug display options 
 		#--SYSTEM STILL LOGS--
-		self.pub_chat = False
 		self.privchat = False
 		self.log_event = True
 		self.log_command = True
+		self.debugger = db.debugger(prefix=self.channel[1:5], level=debug_level)
 		self.debug = False
 
 		self.live = False
@@ -48,6 +49,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.emoteUsageData = {}
 		self.formatBackup()
 
+		self.last_message = ""
 		
 		#Setting up the DNN to come up with responces.
 		self.ai = None
@@ -75,8 +77,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.processingTasks = [self.logEmotes]
 		
 		server = 'irc.chat.twitch.tv'
-		port = 6667
-		print('[%s]Connecting to %s on port %s...'%(self.channel[1:5], server, port))
+		self.debugger.log('Connecting to %s on port %s...'%(server, port))
 		irc.bot.SingleServerIRCBot.__init__(self, [(server, port, 'oauth:' +self.token)], self.username, self.username)
 
 	"""
@@ -88,55 +89,53 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 	"""
 	def on_welcome(self, c, e):
 		self.connection = c
-		timeInfo = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
-		print('[%s]Connected to Twitch at %s.' % (self.channel[1:5], timeInfo))
+		self.debugger.log('Connected to Twitch at %s.' % (datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")))
 		# You must request specific capabilities before you can use them
 		c.cap('REQ', ':twitch.tv/membership')
 		c.cap('REQ', ':twitch.tv/tags')
-		c.cap('REQ', ':twitch.tv/commands')		
+		c.cap('REQ', ':twitch.tv/commands')
+
 		self.send_join()			
 
 	def on_join(self, c, e):
-		self.connection = c
-		self.live = True
-		self.mqtt.live = True
 		timeInfo = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
-		self.mqtt.attr_updater("Bot", ["Connection", "Live"], ["Timestamp", timeInfo])
-		print('[%s]Connected to %s at %s.' % (self.channel[1:5], e.target, timeInfo))
+		if not self.live:
+			self.connection = c
+			self.live = True
+			self.mqtt.live = True
+			self.mqtt.attr_updater("Bot", ["Connection", "Live"], ["Timestamp", timeInfo])
+			self.debugger.log('Connected to %s at %s.' % (e.target, timeInfo))
+		else:
+			self.debugger.log('[%s]Connection Issue - Exiting at %s.' % (timeInfo))			
+			self.exit()
 
 	#Channel Events (Subs/Bombs/Bits Etc)
 	def on_usernotice(self, c, e):
 		self.connection = c
 		msgData = self.structureNotice(e)
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			eventlog = "[USERNOTICE][%s]:%s"%(timeInfo, msgData)
-			self.mqtt.attr_updater("Debug", ["USERNOTICE", eventlog])
-			print(eventlog)
+		self.debugger.log("[USERNOTICE]%s"%(msgData), 2)
 
 	#When you join a channel it will send a userstate. (https://dev.twitch.tv/docs/irc/tags/ for full info).
 	def on_userstate(self, c, e):
 		self.connection = c
 		msgData = self.structureNotice(e)
 		self.subscriber = (msgData['subscriber'] == '1')
+		
 		now = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
 		info = 'Not Subscribed.'
 		if 'badge-info' in msgData.keys() and not msgData['badge-info'] is None:
 			info = "%s %s" %(msgData['badge-info'].split('/')[1], "- Active")
 		self.mqtt.attr_updater("Bot", ["Subscribed", info], ["Timestamp", now])
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			eventlog = "[USERSTATE][%s]:%s"%(timeInfo, msgData)
-			self.mqtt.attr_updater("Debug", ["USERSTATE", eventlog])
-			print(eventlog)
+		self.debugger.log("[USERSTATE]%s"%(msgData), 2)
 
 	def on_pubmsg(self, c, e):
 		self.connection = c
 		msgData = self.structureMessage(e)
 		for process in self.processingTasks:
 			process(msgData)
-		if self.pub_chat:
-			print(self.formatMessage(msgData))
+
+
+		self.debugger.log("[c]%s"%(msgData), 4)
 
 		#2 different behaviors:
 		# When someone @'s the bot itll respond with a generated message.
@@ -144,6 +143,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		if self.chatOutput:
 			responce = ""
 			if False and self.username.lower() in msgData['message'].lower():
+				#TODO: Generate a response.
 				if self.ai is not None:
 					responce = self.ai.generateMessage(0.3)[0]
 				responce = '@%s %s' % (msgData['display-name'], responce)
@@ -152,12 +152,10 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 				responce = self.chatHandler.decode(msgData)
 				if responce is not None:
 					timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-					eventlog = "[%s][Resp][%s]:%s - Cooldown %ss"%(self.channel[1:5], timeInfo, responce, self.chatHandler.global_cooldown)
-					self.eventLog.append(eventlog)
+					self.eventLog.append("[%s][Resp][%s]:%s - Cooldown %ss"%(self.channel[1:5], timeInfo, responce, self.chatHandler.global_cooldown))
 					timeInfo = datetime.utcnow().strftime("%H:%M:%S - %y/%m/%d")
 					self.mqtt.attr_updater("Response", ["Cooldown", self.chatHandler.global_cooldown], ["Timestamp", timeInfo])
-					if self.log_event:
-						print(eventlog)
+					self.debugger.log("%s - Cooldown %ss"%(responce, self.chatHandler.global_cooldown))
 
 	"""
 	{'type': whisper,
@@ -206,37 +204,30 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 	"""
 	
 	def send_pubmsg(self, msg):
-		timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
 		sendString = "PRIVMSG %s :%s"%(self.channel, msg)
-		if self.debug:
-			print("[%s][PUBMSG]>%s"%(timeInfo, msg))
+		self.last_message = sendString
 		self.connection.send_raw(sendString)
+		self.debugger.log("[PUBMSG]>%s"%(sendString), 6)
 
 	def send_whisper(self, target, msg):
-		timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
 		sendString = "PRIVMSG %s :/w %s %s"%(self.channel, target, msg)
-		if self.debug:
-			print("[%s][WHISPER]>%s"%(timeInfo, sendString))
 		self.connection.send_raw(sendString)
+		self.debugger.log("[WHISPER]>%s"%(sendString), 6)
 
 	def send_disconnect(self):
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]		
-			print("[send_disconnect][%s]:%s"%(timeInfo, self.live))
+		self.debugger.log("[send_disconnect]:Live - %s"%(self.live))
 		if self.live:
 			self.connection.part(self.channel)
 			now = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
-			print("Disconnected from %s's channel at %s." %(self.channel, now))
+			self.debugger.log("Disconnected from %s's channel at %s." %(self.channel, now),2)
 			self.live = False
 			self.mqtt.live = False
 			self.mqtt.attr_updater("Bot", ["Connection", "Disconnected"], ["Timestamp", now])
 
 	def send_join(self):
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]	
-			print("[send_join][%s]:%s"%(timeInfo, self.live))
+		self.debugger.log("[send_join]:Live - %s"%(self.live),2)
 		if not self.live:
-			print('[%s]Joining %s as %s...' % (self.channel[1:5], self.channel, self.connection.ircname))
+			self.debugger.log('Joining %s as %s...' % (self.channel, self.connection.ircname))
 			self.connection.join(self.channel)
 
 	"""
@@ -373,13 +364,9 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 				dcEvent = sh.functionEvent(self, 'disconnect_%s'%(disconnectTimes.index(dcTime)), self.send_disconnect, eventTime, True)
 				self.eventScheduler.addEvent(dcEvent)
 		except KeyError:
-			if self.debug:
-				timeInfo = (datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1)
-				print("[Scheduler][%s][ERROR] Corrupted Schedule. Schedule not loaded."%(timeInfo))
+			self.debugger.log("[ERROR] Corrupted Schedule. Schedule not loaded.")				
 		except TypeError:
-			if self.debug:
-				timeInfo = (datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1)
-				print("[Scheduler][%s][ERROR] Schedule Not Found."%(timeInfo,))
+			self.debugger.log("[ERROR] Schedule Not Found.")
 
 
 	#Processes the timeString and does a few checks on it
@@ -401,7 +388,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		#Checking if The start time already happened today. 
 		#Eg. Bot is started at 12pm. Connect scheduled 8am will be set for Tomorrow at 8 Am 
 		if (eventTime - datetime.utcnow()).days < 0:
-			eventTime = eventTime + timedelta(seconds=86400)
+			eventTime = (eventTime + timedelta(day=1))
 		if self.debug:
 			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
 			print("[Processes Time][%s][EVENT:%s]:%s<=%s=%s-%s - %s"%(timeInfo, eventTime.strftime('%d - %H:%M:%S'), self.minDiff, diff, hour, currentHour, ifMin))
@@ -420,9 +407,14 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.formatBackup()
 
 	def exit(self):
+		self.live = False
 		self.eventScheduler.closeAllEvents()
+		exitEvent = sh.functionEvent(self, 'exit', self.graceful_exit, 2, False)
+		self.eventScheduler.addEvent(exitEvent)
+
+	def graceful_exit(self):		
 		timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-		print("[EXIT][%s][%s] Closing connections and threads."%(timeInfo, self.channel))
+		self.debugger.log("[EXIT]Closing connections and threads.")
 		self.die(msg="")
 
 
