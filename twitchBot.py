@@ -14,23 +14,23 @@ import mqttHandler as mqtt
 import chatHandler as chatH
 import commandHandler as commH
 import resourceHandler as rh
-from random import randint
+from random import randint, uniform
 from datetime import datetime, timedelta
 from time import strftime, strptime
 
 class TwitchBot(irc.bot.SingleServerIRCBot):
-	def __init__(self, username, channel, token, port = 6667, debug_level=0):
+	def __init__(self, username, channel, token, port = 6667, debug_level=1):
 		self.username = username
 		self.client_id =  secrets.CHAT_CLIENT_ID
 		self.channel = '#' + channel
 		self.token = token
 		self.subscriber = False
+
+		self.user_info = {'emote-sets': ""}
+#		self.global_cooldown
 		
 		#debug display options 
 		#--SYSTEM STILL LOGS--
-		self.privchat = False
-		self.log_event = True
-		self.log_command = True
 		self.debugger = db.debugger(prefix=self.channel[1:5], level=debug_level)
 		self.debug = False
 
@@ -50,8 +50,9 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.formatBackup()
 
 		self.last_message = ""
+		self.emoteSets = []
 		
-		#Setting up the DNN to come up with responces.
+		#Setting up the DNN to come up with responses.
 		self.ai = None
 		#try:
 		#	import chatAI as cAI
@@ -70,7 +71,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 
 		self.loadUserPermissions('data/permissionList.json')
 		self.commandHandler = commH.commandHandler(self)
-		self.chatHandler = chatH.chatHandler(self)
+		self.chatHandler = chatH.chatHandler()
 		
 		#Functions to be called on each public message sent.
 		#This is where you add ALL things that process messages.
@@ -98,16 +99,18 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.send_join()			
 
 	def on_join(self, c, e):
-		timeInfo = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
-		if not self.live:
-			self.connection = c
-			self.live = True
-			self.mqtt.live = True
-			self.mqtt.attr_updater("Bot", ["Connection", "Live"], ["Timestamp", timeInfo])
-			self.debugger.log('Connected to %s at %s.' % (e.target, timeInfo))
-		else:
-			self.debugger.log('[%s]Connection Issue - Exiting at %s.' % (timeInfo))			
-			self.exit()
+		self.debugger.log('[JOIN]%s' % (e), 4)	
+		if e.target == self.channel:
+			timeInfo = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
+			if not self.live:
+				self.connection = c
+				self.live = True
+				self.mqtt.live = True
+				self.mqtt.attr_updater("Bot", ["Connection", "Live"], ["Timestamp", timeInfo])
+				self.debugger.log('Connected to %s at %s.' % (e.target, timeInfo))
+			else:
+				self.debugger.log('Connection Issue - Exiting at %s.' % (timeInfo))			
+				self.exit()
 
 	#Channel Events (Subs/Bombs/Bits Etc)
 	def on_usernotice(self, c, e):
@@ -120,7 +123,10 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		self.connection = c
 		msgData = self.structureNotice(e)
 		self.subscriber = (msgData['subscriber'] == '1')
-		
+		if self.user_info['emote-sets'] != msgData['emote-sets']:
+			defaultEmotes, standaloneEmotes, subEmotes = self.getEmoteSets(msgData['emote-sets'])
+			self.unpackEmotes(defaultEmotes, standaloneEmotes, subEmotes)
+		self.user_info = msgData
 		now = datetime.utcnow().strftime("%H:%M:%S on %d/%m/%y")
 		info = 'Not Subscribed.'
 		if 'badge-info' in msgData.keys() and not msgData['badge-info'] is None:
@@ -140,22 +146,21 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		#2 different behaviors:
 		# When someone @'s the bot itll respond with a generated message.
 		# It will generate ChatEvents based on flow and content of messages (see chatHandler.py)
-		if self.chatOutput:
-			responce = ""
-			if False and self.username.lower() in msgData['message'].lower():
-				#TODO: Generate a response.
-				if self.ai is not None:
-					responce = self.ai.generateMessage(0.3)[0]
-				responce = '@%s %s' % (msgData['display-name'], responce)
-				self.send_pubmsg(responce)
-			else:
-				responce = self.chatHandler.decode(msgData)
-				if responce is not None:
-					timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-					self.eventLog.append("[%s][Resp][%s]:%s - Cooldown %ss"%(self.channel[1:5], timeInfo, responce, self.chatHandler.global_cooldown))
-					timeInfo = datetime.utcnow().strftime("%H:%M:%S - %y/%m/%d")
-					self.mqtt.attr_updater("Response", ["Cooldown", self.chatHandler.global_cooldown], ["Timestamp", timeInfo])
-					self.debugger.log("%s - Cooldown %ss"%(responce, self.chatHandler.global_cooldown))
+		if self.chatOutput and 'bot' not in msgData['display-name'].lower():
+			response = self.chatHandler.decode(msgData)
+			if response is not None:
+				if self.subscriber:
+					message = response['subMessage']
+				else:
+					message = response['message']
+				bcEvent = sh.broadcastEvent(self, name=response['name'], message=message, freq=response['delay'])
+				self.eventScheduler.addEvent(bcEvent)
+				timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
+				self.eventLog.append("[%s][Resp][%s]:%s - Cooldown %ss"%(self.channel[1:5], timeInfo, response, self.chatHandler.global_cooldown))
+				
+				timeInfo = datetime.utcnow().strftime("%H:%M:%S - %y/%m/%d")
+				self.mqtt.attr_updater("Response", ["Cooldown", self.chatHandler.global_cooldown],["Name", response['name']], ["Delay", response['delay']], ["Message", message],["Timestamp", timeInfo])
+				self.debugger.log("[%s]%s - Cooldown %ss"%(response["name"], message, self.chatHandler.global_cooldown))
 
 	"""
 	{'type': whisper,
@@ -178,7 +183,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		msg = self.structureMessage(e)
 		timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
 		if msg['message'][0] == "/":
-			cmdLog = "[COMMAND][%s][%s]:%s"%(timeInfo, msg['display-name'], msg['message'])
+			cmdLog = "[%s]:%s"%(msg['display-name'], msg['message'])
 			#Checks commands and permissions
 			if msg['source'] in self.permissions.keys():
 				cmdResponse = self.commandHandler.decode(msg['message'][1:], self.permissions[msg['source']])
@@ -187,12 +192,9 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 			else:
 				cmdLog = "%s - ERROR: No command permissions."%(cmdLog)
 			self.commandLog.append(cmdLog)
-			if self.log_command:
-				print(cmdLog)
+			self.debugger.log("[CMD]%s"%(cmdLog), 6)
 		else:
-			if self.privchat:
-				print("[Whisper][%s][%s]:%s"%(timeInfo, msg['display-name'], msg['message']))
-
+			self.debugger.log("[WSP][%s]:%s"%(msg['display-name'], msg['message']), 8)	
 
 
 	"""
@@ -225,7 +227,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 			self.mqtt.attr_updater("Bot", ["Connection", "Disconnected"], ["Timestamp", now])
 
 	def send_join(self):
-		self.debugger.log("[send_join]:Live - %s"%(self.live),2)
+		self.debugger.log("[send_join]:Live - %s"%(self.live), 2)
 		if not self.live:
 			self.debugger.log('Joining %s as %s...' % (self.channel, self.connection.ircname))
 			self.connection.join(self.channel)
@@ -236,6 +238,9 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 						Bot Functions
 
 	============================================================
+	"""
+
+	"""
 	EmoteStructure: [E]/[ID]:[pos][,[pos]]
 	Emotes events are separated by '/', each instance is spearated by ','.
 	"""
@@ -302,6 +307,74 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 	 'user-type': None
 	}
 	"""
+	def getEmoteSets(self, setIDs):
+		header = {"Accept": "application/vnd.twitchtv.v5+json", "Client-ID": secrets.CLIENT_ID}
+		self.debugger.log("[ES-ID]%s"%(setIDs), 3)
+		url = "https://api.twitch.tv/kraken/chat/emoticon_images?emotesets=%s"%(setIDs)
+		r = (requests.get(url, headers=header, verify=True))
+		#self.debugger.log(r.json()["emoticon_sets"].keys(), 1)
+		emoteSets = r.json()["emoticon_sets"]
+		twitchEmoteList = []
+		subEmoteList = []
+		for emoteSet in emoteSets.keys():
+			if int(emoteSet) in [0]: #Global Emotes
+				for emote in emoteSets[emoteSet]:
+					twitchEmoteList.append(emote["code"])
+			else:				
+				for emote in emoteSets[emoteSet]:
+					subEmoteList.append(emote["code"])
+		self.debugger.log("[tEL]%s"%(twitchEmoteList),3)
+		self.debugger.log("[sEL]%s"%(subEmoteList),3)
+
+		bttEmoteList = []
+		url = "https://decapi.me/bttv/emotes/%s"%(self.channel[1:])
+		r = (requests.get(url, verify=True)).text
+		bttEmoteList = r.split()
+		self.debugger.log("[bEL]%s"%(bttEmoteList), 3)
+
+		ffzEmoteList = []
+		r = (requests.get("https://api.frankerfacez.com/v1/emoticons?sort=count-desc&per_page=100", verify=True)).json()
+		for emoteSet in r['emoticons']:
+			ffzEmoteList.append(emoteSet['name'])
+		self.debugger.log("[fEL]%s"%(ffzEmoteList),3)
+		#return default, standalone, subemotes
+		return twitchEmoteList + ffzEmoteList , bttEmoteList, subEmoteList
+	
+	def unpackEmotes(self, defaultEmotes, standaloneEmotes, subEmotes):
+		responses = []
+		for emote in defaultEmotes:			
+			kwarg = self.getBlankTreshholdResponse(emote)
+			kwarg["subResponse"] = [emote]
+			for em in subEmotes:
+				if emote.lower() in em.lower():
+					kwarg["subResponse"] = [em]
+					kwarg["keywords"].append(em)		
+					self.debugger.log("[EMTS]%s - %s %s"%(em, emote,kwarg), 3)			
+					subEmotes.remove(em)
+			responses.append(chatH.threshholdResponse(**kwarg))
+
+		for emote in standaloneEmotes:
+			kwarg = self.getBlankTreshholdResponse(emote)
+			kwarg["response"] = [emote]		
+			responses.append(chatH.threshholdResponse(**kwarg))
+
+		for emote in subEmotes:
+			kwarg = self.getBlankTreshholdResponse(emote)
+			kwarg["subResponse"] = [emote]
+			responses.append(chatH.threshholdResponse(**kwarg))
+		self.chatHandler.addResponse(responses)
+
+	def getBlankTreshholdResponse(self, emote):
+		kwarg = { "name": emote,
+				  "keywords": [emote],
+			 	  "threshhold" : randint(3, 4), 
+				  "period": randint(2, 4), 
+				  "cooldown": randint(100, 300),
+				  "min_delay": 0,
+				  "max_delay": randint(1, 3)
+				}
+		return kwarg
+
 	def structureMessage(self, message):
 		msgInfo = {}
 		msgInfo["message"] = message.arguments[0]
@@ -389,9 +462,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		#Eg. Bot is started at 12pm. Connect scheduled 8am will be set for Tomorrow at 8 Am 
 		if (eventTime - datetime.utcnow()).days < 0:
 			eventTime = (eventTime + timedelta(day=1))
-		if self.debug:
-			timeInfo = str((datetime.utcnow() - datetime(1970, 1, 1)) / timedelta(seconds=1))[4:10]
-			print("[Processes Time][%s][EVENT:%s]:%s<=%s=%s-%s - %s"%(timeInfo, eventTime.strftime('%d - %H:%M:%S'), self.minDiff, diff, hour, currentHour, ifMin))
+		self.debugger.log("[PT][EVENT:%s]:%s<=%s=%s-%s - %s"%(eventTime.strftime('%d - %H:%M:%S'), self.minDiff, diff, hour, currentHour, ifMin), 3)
 		return ifMin, eventTime
 
 	def loadUserPermissions(self, filename):
@@ -402,8 +473,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		for key in data.keys():
 			if len(data[key]) > 0:
 				setattr(self, key, data[key])
-				if self.debug:
-					print("Historic data %s loaded. %s entries."%(key, len(data[key])))
+				self.debugger.log("Historic data %s loaded. %s entries."%(key, len(data[key])), 2)
 		self.formatBackup()
 
 	def exit(self):
@@ -425,23 +495,29 @@ def main():
 
 	args = sys.argv[1:]
 	state = 0
-	username = ''
-	token = ''
+	kwargs = {"username": '',
+			  "token": '',
+			  "channel": '',
+			  "debug_level": 0  
+			}
 	channels = []
-	maps = {'-u':1, '-t':2, '-c':3 }
+	maps = {'-u':1, '-t':2, '-c':3 , '-d':4}
 	for arg in args:
 		try:
 			state = maps[arg]
 		except:		
 			if state == 1:
-				username = arg
+				kwargs['username'] = arg
 			elif state == 2:
-				token = arg
+				kwargs['token'] = arg
 			elif state == 3:
 				channels.append(arg)
+			elif state == 4:
+				kwargs['debug_level'] = int(arg)
 	threads = {}
 	for channel in channels:
-		bot = TwitchBot(username, channel, token)
+		kwargs['channel'] = channel
+		bot = TwitchBot(**kwargs)
 		threads[channel] = threading.Thread(target=bot.start)
 		threads[channel].start()
 		
