@@ -10,12 +10,13 @@ import scheduler as sh
 import resourceHandler as rh
 import debugger as db
 from datetime import datetime, timedelta
+from random import randint, uniform
 # use prefix to determine the chat emote prefix
 
 
 class chatHandler():
 	def __init__(self, cooldown = [80,120]):
-		self.debugger = db.debugger()
+		self.debugger = db.debugger.getInstance()
 
 		self.cooldownRange = cooldown
 		self.global_cooldown = random.randint(*self.cooldownRange)
@@ -23,21 +24,6 @@ class chatHandler():
 
 		self.keywords = {}
 		self.responses = {}
-
-		#self.loadDefaultResponses()
-		#self.loadChannelResponses()
-
-	def loadDefaultResponses(self):
-		self.loadResponses('data/defaultResponses.json')
-
-	def loadChannelResponses(self):
-		try:
-			self.loadResponses('data/%s/channelResponses.json'%(self.bot.channel[1:]))
-		except TypeError:
-			data = {"messageResponse": [], "threshholdResponse": []}
-			rh.writeJSON('data/%s/channelResponses.json'%(self.bot.channel[1:]), data)
-			self.debugger.log("Writing Default responses JSON.")
-
 
 	def loadResponses(self, filePointer):
 		responseData = rh.readFile(filePointer)
@@ -50,9 +36,6 @@ class chatHandler():
 			channelResponses.append(messageResponse(**message))
 		self.addResponse(channelResponses)
 		self.debugger.log("[cH]Loaded responses, %s messageResponses, %s threshholdResponses."%(len(responseData['messageResponse']), len(responseData['threshholdResponse'])), 3)
-
-
-			 
 
 	"""
 	Checks if any of the keywords are in the message.
@@ -109,14 +92,14 @@ class chatHandler():
 
 """
 Command Flow: chatHandler.decode -> chatResponse.reactor -> <commandType>.execute -[DOES COMMAND]> Return command outcome ['string'].
-responseOpt:
+messageOptions:
 [ 't': 0-2, #TYPE: 0 - One to One, 1 - Spam response, 2 - Chain Response
   'p': 0-1, #Pass Chance
   'ms': 10, #Max Spam - Max Character Length
 ]
 """
 class chatResponse():
-	def __init__(self, name, keywords, response, subResponse, min_delay, max_delay, responseOpt):
+	def __init__(self, name, keywords, response, subResponse, min_delay, max_delay, messageOptions):
 		self.name = name
 		self.keywords = keywords
 		self.response = response
@@ -126,41 +109,30 @@ class chatResponse():
 			self.subResponse = subResponse
 		self.min_delay = min_delay
 		self.max_delay = max_delay
-		self.responseOpt = responseOpt
+		self.messageOptions = messageOptions
 
 	def reactor(self, message):		
 		return processMessage(message)
 
-	#Specifically for generating a random response based on the responseOpt
+	#Specifically for generating a random response based on the messageOptions
 	def processMessage(self, message):
-		msg_pass = self.responseOpt['p']
-		if random.randint(0,100)/100 < msg_pass:
-			msg_type = self.responseOpt['t']
-			if msg_type == 0:
-				msg_spam = 1
-			else: 
-				msg_spam = random.randint(0, self.responseOpt['ms'])
-			mod_message = message
-			for i in range(msg_spam-1):
-				if random.randint(0,10) < 5:#Place for special spice maybe a crowd voracity?
-					mod_message = mod_message + message				
-			return mod_message
+		msg_pass = self.messageOptions['p']
+		if random.randint(0,100) <= msg_pass*100:
+			return message
 		else:
 			return ""
 
 	#Collects all of the necessary things needed to send a message
 	def execute(self):
-		randomResponse = random.randint(0, len(self.subResponse))-1
 		delay = random.randint(self.min_delay*1000, self.max_delay*1000)/1000
+
+		randomResponse = random.randint(0, len(self.subResponse))-1
 		subMessage = self.processMessage(self.subResponse[randomResponse])
 
 		randomResponse = random.randint(0, len(self.response))-1
-		delay = random.randint(self.min_delay*1000, self.max_delay*1000)/1000
 		message = self.processMessage(self.response[randomResponse])
 		response = {"name": self.name, "delay": delay, "message": message, "subMessage": subMessage}		
 		return response
-
-
 
 
 """
@@ -169,10 +141,10 @@ Sets an exact response for a set of keywords(strings) for it to respond to, ever
 
 """
 class messageResponse(chatResponse):
-	def __init__(self, name, keywords = [], response = [''], subResponse = [], userList = [], min_delay = 0, max_delay = 2, responseOpt = {'t':0, 'p': 1}):
+	def __init__(self, name, keywords = [], response = [''], subResponse = [], userList = [], min_delay = 0, max_delay = 2, messageOptions = {'p': 1}):
 		self.userList = userList
 		self.response = response
-		super().__init__(name, keywords, response, subResponse, min_delay, max_delay, responseOpt)
+		super().__init__(name, keywords, response, subResponse, min_delay, max_delay, messageOptions)
 
 	def reactor(self, message):
 		if message['display-name'].lower() in self.userList:
@@ -185,10 +157,11 @@ This is for when the bot will be listening for #<threshhold> messages containing
 It will wait for <cooldown> seconds until it reacts again.
 """
 class threshholdResponse(chatResponse):
-	def __init__(self, name, keywords = [], response = [''], subResponse = [],  threshhold = 4, period = 2, cooldown = 60, min_delay=0, max_delay=3, responseOpt = {'t':0, 'p': 0.5}):
-		self.debugger = db.debugger()
+	def __init__(self, name, keywords = [], response = [''], subResponse = [],  threshhold = 4, period = 2, cooldown = 60, min_delay=0, max_delay=3, messageOptions = {'p': 0.8}):
+		self.debugger = db.debugger.getInstance()
 
-		self.count = 0
+		self.threshholdCount = 0
+		self.keywordCount = 1
 		self.period = period
 		self.cooldown = cooldown
 		self.threshhold = threshhold
@@ -198,22 +171,33 @@ class threshholdResponse(chatResponse):
 		self.lastTriggered = datetime.now() + timedelta(seconds=cooldown)
 		
 		self.taste = []
-		super().__init__(name, keywords, response, subResponse, min_delay, max_delay, responseOpt)
+		super().__init__(name, keywords, response, subResponse, min_delay, max_delay, messageOptions)
 
 		
 	def reactor(self, message):
 		cooldown = (datetime.utcnow()-self.lastTriggered).seconds < self.cooldown
 		if cooldown or (datetime.utcnow()-self.lastCounted).seconds > self.period:
-			self.count = 0
+			self.threshholdCount = 0
+			self.keywordCount = 1
 			self.lastMessage = ""
-		self.count += 1
+		self.threshholdCount += 1
 		self.lastCounted = datetime.utcnow()
 		self.lastMessage = message["message"]
+		keywordCount = message["message"].split().count(message['keyword'])
+		if keywordCount > self.keywordCount:
+			self.keywordCount = keywordCount
 
-		debug = 'Ct %d/%d - St %s/%s' % (self.count, self.threshhold, (datetime.utcnow()-self.lastCounted).seconds, self.period)
-		if cooldown:
-			debug = debug + " - Cooldown"
-		self.debugger.log("[cHthR][%s]:%s" % (self.name[:6], debug), 1)
-		if self.count >= self.threshhold:
+		debug = 'Ct %d/%d | St %s/%s | I %s | Cooldown: %s' % (self.threshholdCount, self.threshhold, (datetime.utcnow()-self.lastCounted).seconds, self.period, self.keywordCount, cooldown)
+		self.debugger.log("[cHthR][%s]:%s" % (self.name[:6], debug), 4)
+		if self.threshholdCount >= self.threshhold:
+			randint
 			self.lastTriggered = datetime.utcnow()			
 			return chatResponse.execute(self)
+
+	def processMessage(self, message):
+		spam = randint(1, self.keywordCount)
+		self.debugger.log("[cHthR][%s]:Max - %s | Spam - %s" % (self.name[:6], self.keywordCount, spam), 4)
+		keyword = message
+		for i in range(1, spam):
+			message = "%s %s"%(message, keyword)
+		return super().processMessage(message)

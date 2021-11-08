@@ -16,11 +16,15 @@ class debugger():
 			self.template = template
 			self.level = level
 			self.start_time = datetime.utcnow()
-		debugger.instance = self
+		debugger.__instance = self
 
+	def getInstance(prefix = "UNKO", level = 0):
+		if debugger.__instance is None:
+			debugger(prefix, level)
+		return debugger.__instance
 		
 
 	def log(self, message, level = 0):
 		if self.level >= level:
-			timeInfo = float((datetime.utcnow() - self.start_time) / timedelta(seconds=1))
+			timeInfo = float((datetime.utcnow() - self.start_time) / timedelta(seconds=1))%86400
 			print(self.template.format(self.prefix, timeInfo, message))

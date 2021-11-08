@@ -33,6 +33,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 		#--SYSTEM STILL LOGS--
 		self.debugger = db.debugger(prefix=self.channel[1:5], level=debug_level)
 		self.debug = False
+		
 
 		self.live = False
 		self.chatOutput = True
@@ -141,12 +142,12 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 			process(msgData)
 
 
-		self.debugger.log("[c]%s"%(msgData), 4)
+		self.debugger.log("[c]%s"%(msgData), 2)
 
 		#2 different behaviors:
 		# When someone @'s the bot itll respond with a generated message.
 		# It will generate ChatEvents based on flow and content of messages (see chatHandler.py)
-		if self.chatOutput and 'bot' not in msgData['display-name'].lower():
+		if self.chatOutput and (msgData['mod'] != '1'):
 			response = self.chatHandler.decode(msgData)
 			if response is not None:
 				if self.subscriber:
@@ -363,6 +364,7 @@ class TwitchBot(irc.bot.SingleServerIRCBot):
 			kwarg["subResponse"] = [emote]
 			responses.append(chatH.threshholdResponse(**kwarg))
 		self.chatHandler.addResponse(responses)
+		self.debugger.log("Loaded Emotes. FreEmotes - %s | SubEmotes - %s"%((len(defaultEmotes)+len(standaloneEmotes)), len(subEmotes)))
 
 	def getBlankTreshholdResponse(self, emote):
 		kwarg = { "name": emote,
